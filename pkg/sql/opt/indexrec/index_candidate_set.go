@@ -69,6 +69,7 @@ type indexCandidateSet struct {
 	rangeCandidates    map[cat.Table][][]cat.IndexColumn
 	joinCandidates     map[cat.Table][][]cat.IndexColumn
 	invertedCandidates map[cat.Table][][]cat.IndexColumn
+	tupleCandidates    map[cat.Table][][]cat.IndexColumn
 	overallCandidates  map[cat.Table][][]cat.IndexColumn
 }
 
@@ -80,6 +81,7 @@ func (ics *indexCandidateSet) init(md *opt.Metadata) {
 	ics.rangeCandidates = make(map[cat.Table][][]cat.IndexColumn, numTables)
 	ics.joinCandidates = make(map[cat.Table][][]cat.IndexColumn, numTables)
 	ics.invertedCandidates = make(map[cat.Table][][]cat.IndexColumn, numTables)
+	ics.tupleCandidates = make(map[cat.Table][][]cat.IndexColumn, numTables)
 	ics.overallCandidates = make(map[cat.Table][][]cat.IndexColumn, numTables)
 }
 
@@ -92,10 +94,12 @@ func (ics *indexCandidateSet) combineIndexCandidates() {
 	copyIndexes(ics.rangeCandidates, ics.overallCandidates)
 	copyIndexes(ics.joinCandidates, ics.overallCandidates)
 	copyIndexes(ics.invertedCandidates, ics.overallCandidates)
+	copyIndexes(ics.tupleCandidates, ics.overallCandidates)
 
 	numTables := len(ics.overallCandidates)
 	equalJoinCandidates := make(map[cat.Table][][]cat.IndexColumn, numTables)
 	equalGroupedCandidates := make(map[cat.Table][][]cat.IndexColumn, numTables)
+	tupleGroupedCandidates := make(map[cat.Table][][]cat.IndexColumn, numTables)
 
 	// Construct EQ, EQ + R, J + R, EQ + J, EQ + J + R, eq + (inverted),
 	// EQ + (inverted).
@@ -108,6 +112,9 @@ func (ics *indexCandidateSet) combineIndexCandidates() {
 	constructIndexCombinations(equalJoinCandidates, ics.rangeCandidates, ics.overallCandidates)
 	constructIndexCombinations(ics.equalCandidates, ics.invertedCandidates, ics.overallCandidates)
 	constructIndexCombinations(equalGroupedCandidates, ics.invertedCandidates, ics.overallCandidates)
+
+	groupIndexesByTable(ics.tupleCandidates, tupleGroupedCandidates)
+	copyIndexes(tupleGroupedCandidates, ics.overallCandidates)
 }
 
 // categorizeIndexCandidates finds potential index candidates for a given
@@ -147,6 +154,9 @@ func (ics *indexCandidateSet) categorizeIndexCandidates(expr opt.Expr) {
 		ics.addJoinIndexes(expr.On)
 	case *memo.AntiJoinExpr:
 		ics.addJoinIndexes(expr.On)
+	case *memo.InExpr:
+		ics.addInExprIndexes(expr.Left, ics.tupleCandidates)
+		ics.addInExprIndexes(expr.Right, ics.tupleCandidates)
 	case *memo.UnionExpr:
 		ics.addSetOperationIndexes(expr.LeftCols, expr.RightCols)
 	case *memo.IntersectExpr:
@@ -421,6 +431,21 @@ func (ics *indexCandidateSet) addGeoSpatialIndexes(
 			var child = expr.Args.Child(i)
 			// Spatial Indexes should be added to inverted candidates group in
 			// addVariableExprIndex.
+			ics.addVariableExprIndex(child, indexCandidates)
+		}
+	}
+}
+
+func (ics *indexCandidateSet) addInExprIndexes(
+	expr opt.Expr, indexCandidates map[cat.Table][][]cat.IndexColumn,
+) {
+	switch expr := expr.(type) {
+	case *memo.VariableExpr:
+		ics.addVariableExprIndex(expr, indexCandidates)
+
+	case *memo.TupleExpr:
+		for i, n := 0, expr.Elems.ChildCount(); i < n; i++ {
+			var child = expr.Elems.Child(i)
 			ics.addVariableExprIndex(child, indexCandidates)
 		}
 	}
